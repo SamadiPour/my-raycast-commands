@@ -4,7 +4,7 @@
 # @raycast.schemaVersion 1
 # @raycast.title B612 Status
 # @raycast.mode inline
-# @raycast.refreshTime 15m
+# @raycast.refreshTime 5m
 
 # Optional parameters:
 # @raycast.icon https://upload.wikimedia.org/wikipedia/en/thumb/0/04/Huawei_Standard_logo.svg/2016px-Huawei_Standard_logo.svg.png
@@ -20,6 +20,7 @@ import shelve
 import sys
 import time
 from functools import partial
+import subprocess
 
 from huawei_lte_api.Client import Client
 from huawei_lte_api.Connection import Connection
@@ -34,6 +35,8 @@ rat_mapping = {
 USERNAME = 'admin'
 PASSWORD = 'password'
 IP = '192.168.10.1'
+SHOW_NOTIFICATION = True
+NOTIFICATION_ACTION = False
 
 
 def app_folder(prog: str) -> str:
@@ -73,34 +76,42 @@ def reboot(conf_number: int | str) -> None:
 
 
 if __name__ == "__main__":
-    with Connection(f'http://{USERNAME}:{PASSWORD}@{IP}/') as connection:
-        client = Client(connection)
-        statistics = client.monitoring.month_statistics()
-        plmn = client.net.current_plmn()
-        upDown = (int(statistics['CurrentMonthDownload']) + int(statistics['CurrentMonthUpload'])) / 1000 / 1000 / 1000
-        ip = client.device.information()['WanIPAddress']
+    try:
+        with Connection(f'http://{USERNAME}:{PASSWORD}@{IP}/') as connection:
+            client = Client(connection)
+            statistics = client.monitoring.month_statistics()
+            plmn = client.net.current_plmn()
+            upDown = (int(statistics['CurrentMonthDownload']) + int(statistics['CurrentMonthUpload'])) / 1000 / 1000 / 1000
+            ip = client.device.information()['WanIPAddress']
 
-        operator = plmn.get('FullName', 'No Operator')
-        mode = rat_mapping.get(plmn.get('Rat', '-1'), None)
+            operator = plmn.get('FullName', 'No Operator')
+            mode = rat_mapping.get(plmn.get('Rat', '-1'), None)
 
-        output = (operator
-                  + (f' {mode}' if mode is not None else '')
-                  + (' - No IP' if ip is None else '')
-                  + ' - ' + str(round(upDown, 2)) + ' GB')
-        print(output)
+            command = "traceroute -d -m 2 1.1.1.1 2>&1 | tail -n 1 | awk '{print $2}'"
+            trace_result = subprocess.check_output(command, shell=True, timeout=10).decode('utf-8').strip()
 
-        # showing notification
-        if ip is None or mode != '4G' or operator != 'SamanTel':
-            now = datetime.datetime.now()
-            last_time = load_key('last_notification')
-            if last_time is not None and now - last_time <= datetime.timedelta(minutes=10):
-                exit()
+            output = (operator
+                    + (f' {mode}' if mode is not None else '')
+                    + (' - No IP' if ip is None else '')
+                    + (' - No Route' if trace_result != '192.168.10.1' else '')
+                    + ' - ' + str(round(upDown, 2)) + ' GB')
+            print(output)
 
-            save_key('last_notification', now)
-            notif.create_notification(
-                title=output,
-                action_button_str="Reboot",
-                action_callback=partial(reboot, conf_number='123123')
-            )
-            time.sleep(30)
-            notif.stop_listening_for_callbacks()
+            # showing notification
+            if SHOW_NOTIFICATION and (ip is None or mode != '4G' or operator.lower() != 'samantel' or trace_result != '192.168.10.1'):
+                now = datetime.datetime.now()
+                last_time = load_key('last_notification')
+                if last_time is not None and now - last_time <= datetime.timedelta(minutes=10):
+                    exit()
+
+                save_key('last_notification', now)
+                notif.create_notification(
+                    title=output,
+                    action_button_str="Reboot" if NOTIFICATION_ACTION else None,
+                    action_callback=partial(reboot, conf_number='123123') if NOTIFICATION_ACTION else None,
+                )
+                if NOTIFICATION_ACTION:
+                    time.sleep(30)
+                    notif.stop_listening_for_callbacks()
+    except Exception as e:
+        print(e)
